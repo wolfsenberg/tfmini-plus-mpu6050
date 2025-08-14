@@ -2,176 +2,335 @@ import serial
 import pygame
 import time
 import math
+from collections import deque
 
-# === SETTINGS ===
-PORT = 'COM4'
+# ===== SETTINGS =====
+PORT = "COM4"     # change if needed
 BAUD = 9600
-WIDTH, HEIGHT = 800, 600
-CENTER_X, CENTER_Y = WIDTH // 2, HEIGHT // 2
-DRAW_LIMIT_CM = 10         # LiDAR distance limit for drawing
-DRAW_SPEED = 2             # Pixels per frame
+WIDTH, HEIGHT = 1400, 900
+CENTER_X, CENTER_Y = WIDTH // 2 - 100, int(HEIGHT // 1.4)
+MAX_CM = 50
+SCALE = 7                    # pixels per cm
+MAP_SMOOTH_N = 8             # heavier smoothing for map points
+BEAM_SMOOTH_N = 2            # minimal smoothing for beam
 
-# === SERIAL SETUP ===
+# Colors
+BLACK = (0, 0, 0)
+WHITE = (255, 255, 255)
+GREEN = (0, 255, 0)
+LIGHT_GREEN = (100, 255, 100)
+DARK_GREEN = (0, 180, 0)
+RED = (255, 50, 50)
+GRAY = (60, 60, 60)
+LIGHT_GRAY = (120, 120, 120)
+DARK_GRAY = (30, 30, 30)
+BLUE = (100, 150, 255)
+
+# ===== SERIAL =====
 ser = serial.Serial(PORT, BAUD, timeout=1)
 time.sleep(2)
 
-# === PYGAME INIT ===
+# ===== PYGAME =====
 pygame.init()
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
-pygame.display.set_caption("TF Mini S with MPU6050 - Continuous Drawing")
-font = pygame.font.SysFont("Arial", 18)
+pygame.display.set_caption("Radar Display")
 clock = pygame.time.Clock()
-draw_surface = pygame.Surface((WIDTH, HEIGHT))
-draw_surface.fill((0, 0, 0))
+font_small = pygame.font.SysFont('Arial', 16)
+font_medium = pygame.font.SysFont('Arial', 18, bold=True)
+font_large = pygame.font.SysFont('Arial', 24, bold=True)
 
-# === BUTTONS ===
-reset_button_rect = pygame.Rect(WIDTH - 110, 10, 100, 30)
-calibrate_button_rect = pygame.Rect(WIDTH - 110, 50, 100, 30)
+# Window state
+minimized = False
+MINI_WIDTH, MINI_HEIGHT = 400, 300
 
-# === STATE ===
-distance_cm = 9999
-yaw_angle = 0
-yaw_offset = 0
+# ===== STATE =====
+map_dist_hist = deque(maxlen=MAP_SMOOTH_N)
+map_yaw_hist = deque(maxlen=MAP_SMOOTH_N)
+beam_yaw_hist = deque(maxlen=BEAM_SMOOTH_N)
+
+sensor = {
+    "distance_raw": 0.0,
+    "yaw_raw": 90.0,
+    "yaw_instant": 90.0,
+    "direction": "Stationary",
+    "object": "None",
+    "gyro": "Still",
+}
+
+distance_plot = 0.0
+beam_distance = 0.0
 calibrated = False
+yaw_offset = 0.0
+scan_points = {}
 
-# Pen position
-current_pos_x = CENTER_X
-current_pos_y = CENTER_Y
-last_pos_x = CENTER_X
-last_pos_y = CENTER_Y
+# UI Layout
+PANEL_WIDTH = 320
+PANEL_X = WIDTH - PANEL_WIDTH - 20
+PANEL_Y = 20
+CARD_HEIGHT = 120
+SPACING = 15
 
-# Direction handling
-current_direction_angle = 0  # degrees, used for movement
-previous_yaw = 0
-yaw_history = []
-movement_threshold = 0.5
-history_length = 10
+# ===== HELPERS =====
+def clamp(v, lo, hi): return max(lo, min(hi, v))
+def movavg(buf, val): buf.append(val); return sum(buf)/len(buf)
+def wrap360(a):
+    while a < 0: a += 360
+    while a >= 360: a -= 360
+    return a
 
-# === FUNCTIONS ===
-def calibrate_yaw():
-    """Set current yaw as the reference (0 degrees)"""
-    global yaw_offset, calibrated, current_direction_angle
-    yaw_offset = yaw_angle
-    calibrated = True
-    current_direction_angle = 0
-    print(f"Calibrated! Yaw offset set to: {yaw_offset}")
+def parse_line(line):
+    out = {}
+    for part in line.split(","):
+        if "=" in part:
+            k, v = part.split("=", 1)
+            out[k.strip().lower()] = v.strip()
+    return out
 
-def get_calibrated_angle():
-    """Get the calibrated yaw angle"""
-    if not calibrated:
-        return yaw_angle
-    calibrated_angle = yaw_angle - yaw_offset
-    while calibrated_angle > 180:
-        calibrated_angle -= 360
-    while calibrated_angle < -180:
-        calibrated_angle += 360
-    return calibrated_angle
+def get_beam_angle(yaw_raw):
+    y = yaw_raw - yaw_offset if calibrated else yaw_raw
+    y = wrap360(y)
+    if 0.0 <= y <= 180.0:
+        reversed_y = 180 - y
+        return movavg(beam_yaw_hist, reversed_y)
+    return None
 
-def detect_gyro_turn():
-    """Return True if gyro has turned enough to change direction"""
-    global yaw_history, previous_yaw
-    if not calibrated:
-        return False
+def get_map_angle(yaw_raw):
+    y = yaw_raw - yaw_offset if calibrated else yaw_raw
+    y = wrap360(y)
+    if 0.0 <= y <= 180.0:
+        reversed_y = 180 - y
+        return movavg(map_yaw_hist, reversed_y)
+    return None
+
+def polar_to_xy(angle_deg, dist_cm):
+    r = dist_cm * SCALE
+    a = math.radians(angle_deg)
+    x = CENTER_X + r * math.cos(a)
+    y = CENTER_Y - r * math.sin(a)
+    return (int(x), int(y))
+
+def draw_card(surface, x, y, w, h, title, content, title_color=WHITE, bg_color=(25, 25, 25)):
+    # Card background
+    card_rect = pygame.Rect(x, y, w, h)
+    pygame.draw.rect(surface, bg_color, card_rect, border_radius=12)
+    pygame.draw.rect(surface, (70, 70, 70), card_rect, 2, border_radius=12)
     
-    current_calibrated_yaw = get_calibrated_angle()
-    yaw_history.append(current_calibrated_yaw)
-    if len(yaw_history) > history_length:
-        yaw_history.pop(0)
+    # Title
+    title_surf = font_medium.render(title, True, title_color)
+    surface.blit(title_surf, (x + 15, y + 12))
     
-    immediate_change = abs(current_calibrated_yaw - previous_yaw)
-    previous_yaw = current_calibrated_yaw
-    return immediate_change > movement_threshold
+    # Content
+    content_y = y + 40
+    for line in content:
+        text_surf = font_small.render(line, True, WHITE)
+        surface.blit(text_surf, (x + 15, content_y))
+        content_y += 22
 
-# === MAIN LOOP ===
+def draw_radar_display():
+    # Radar background circle
+    pygame.draw.circle(screen, (15, 15, 15), (CENTER_X, CENTER_Y), MAX_CM * SCALE + 10)
+    pygame.draw.circle(screen, GRAY, (CENTER_X, CENTER_Y), MAX_CM * SCALE, 2)
+    
+    # Range rings
+    for r in [10, 20, 30, 40]:
+        pygame.draw.circle(screen, DARK_GRAY, (CENTER_X, CENTER_Y), r * SCALE, 1)
+    
+    # Angle lines
+    for angle in range(0, 181, 30):
+        end_pos = polar_to_xy(angle, MAX_CM)
+        color = LIGHT_GRAY if angle == 90 else DARK_GRAY
+        width = 2 if angle == 90 else 1
+        pygame.draw.line(screen, color, (CENTER_X, CENTER_Y), end_pos, width)
+    
+    # Range labels
+    for r in [10, 20, 30, 40, 50]:
+        label_pos = polar_to_xy(90, r)
+        label = font_small.render(f"{r}cm", True, LIGHT_GRAY)
+        screen.blit(label, (label_pos[0] - 15, label_pos[1] - 10))
+    
+    # Angle labels
+    for angle in [0, 30, 60, 90, 120, 150, 180]:
+        label_pos = polar_to_xy(angle, MAX_CM + 15)
+        label = font_small.render(f"{angle}°", True, LIGHT_GRAY)
+        label_rect = label.get_rect(center=label_pos)
+        screen.blit(label, label_rect)
+
+def draw_scan_data():
+    if len(scan_points) > 1:
+        coords = [scan_points[a] for a in sorted(scan_points.keys())]
+        if len(coords) > 1:
+            pygame.draw.lines(screen, DARK_GREEN, False, coords, 3)
+        for coord in coords:
+            pygame.draw.circle(screen, GREEN, coord, 3)
+
+def draw_beam(angle_deg, dist_cm):
+    if angle_deg is None:
+        return
+    
+    end_point = polar_to_xy(angle_deg, dist_cm)
+    
+    # Beam line with gradient effect
+    pygame.draw.line(screen, LIGHT_GREEN, (CENTER_X, CENTER_Y), end_point, 4)
+    pygame.draw.line(screen, GREEN, (CENTER_X, CENTER_Y), end_point, 2)
+    
+    # Target indicator
+    if sensor["object"].lower() != "none" and dist_cm < MAX_CM:
+        pygame.draw.circle(screen, RED, end_point, 12)
+        pygame.draw.circle(screen, WHITE, end_point, 12, 3)
+        pygame.draw.circle(screen, RED, end_point, 6)
+    
+    # Center sensor
+    pygame.draw.circle(screen, WHITE, (CENTER_X, CENTER_Y), 8)
+    pygame.draw.circle(screen, BLUE, (CENTER_X, CENTER_Y), 6)
+
+def draw_ui():
+    if minimized:
+        # Minimized UI - compact display
+        # Mini title bar
+        pygame.draw.rect(screen, (40, 40, 40), (0, 0, MINI_WIDTH, 30), border_radius=8)
+        title = font_medium.render("Radar (Minimized)", True, WHITE)
+        screen.blit(title, (10, 6))
+        
+        # Minimize button (expand)
+        expand_btn = pygame.Rect(MINI_WIDTH - 35, 5, 25, 20)
+        pygame.draw.rect(screen, (80, 80, 80), expand_btn, border_radius=4)
+        pygame.draw.rect(screen, WHITE, (expand_btn.x + 8, expand_btn.y + 8, 9, 4))
+        
+        # Compact data display
+        y_pos = 45
+        compact_data = [
+            f"Distance: {beam_distance:.0f}cm",
+            f"Angle: {get_beam_angle(sensor['yaw_instant']):.0f}°" if get_beam_angle(sensor['yaw_instant']) else "Angle: —",
+            f"Object: {sensor['object']}",
+            f"Status: {'CAL' if calibrated else 'UNCAL'}",
+            "",
+            "M - Maximize | R - Reset | C - Cal | Q - Quit"
+        ]
+        
+        for line in compact_data:
+            color = RED if "object" in line.lower() and sensor["object"].lower() != "none" else WHITE
+            color = GREEN if "CAL" in line and calibrated else color
+            color = RED if "UNCAL" in line else color
+            
+            text = font_small.render(line, True, color)
+            screen.blit(text, (15, y_pos))
+            y_pos += 20
+            
+        return expand_btn
+    else:
+        # Full UI
+        # Minimize button
+        minimize_btn = pygame.Rect(WIDTH - 60, 10, 50, 25)
+        pygame.draw.rect(screen, (60, 60, 60), minimize_btn, border_radius=6)
+        pygame.draw.rect(screen, (100, 100, 100), minimize_btn, 2, border_radius=6)
+        min_text = font_small.render("MIN", True, WHITE)
+        screen.blit(min_text, (minimize_btn.x + 12, minimize_btn.y + 4))
+        
+        # Status panel
+        status_content = [
+            f"Distance: {beam_distance:.1f} cm",
+            f"Angle: {get_beam_angle(sensor['yaw_instant']):.1f}°" if get_beam_angle(sensor['yaw_instant']) else "Angle: —",
+            f"Object: {sensor['object']}"
+        ]
+        object_color = RED if sensor["object"].lower() != "none" else WHITE
+        draw_card(screen, PANEL_X, PANEL_Y, PANEL_WIDTH, CARD_HEIGHT, 
+                  "SENSOR STATUS", status_content, object_color)
+        
+        # System info
+        system_content = [
+            f"Calibrated: {'YES' if calibrated else 'NO'}",
+            f"Direction: {sensor['direction']}",
+            f"Gyro: {sensor['gyro']}",
+            f"Points: {len(scan_points)}"
+        ]
+        calib_color = GREEN if calibrated else RED
+        draw_card(screen, PANEL_X, PANEL_Y + CARD_HEIGHT + SPACING, PANEL_WIDTH, CARD_HEIGHT,
+                  "SYSTEM", system_content, calib_color)
+        
+        # Controls
+        controls_content = [
+            "R - Reset scan data",
+            "C - Calibrate sensor",
+            "M - Minimize window", 
+            "Q - Quit application"
+        ]
+        draw_card(screen, PANEL_X, PANEL_Y + 2*(CARD_HEIGHT + SPACING), PANEL_WIDTH, CARD_HEIGHT,
+                  "CONTROLS", controls_content, BLUE)
+        
+        # Title
+        title = font_large.render("OBJECT SCANNER XD", True, WHITE)
+        screen.blit(title, (30, 30))
+        
+        # Range indicator
+        range_text = font_medium.render(f"MAX RANGE: {MAX_CM}m", True, LIGHT_GRAY)
+        screen.blit(range_text, (30, 70))
+        
+        return minimize_btn
+
+# ===== MAIN LOOP =====
 running = True
 while running:
-    screen.fill((0, 0, 0))
-    screen.blit(draw_surface, (0, 0))
-
-    for event in pygame.event.get():
-        if event.type == pygame.QUIT:
+    # Events
+    for e in pygame.event.get():
+        if e.type == pygame.QUIT:
             running = False
-        if event.type == pygame.MOUSEBUTTONDOWN:
-            if reset_button_rect.collidepoint(event.pos):
-                draw_surface.fill((0, 0, 0))
-                current_pos_x = CENTER_X
-                current_pos_y = CENTER_Y
-                last_pos_x = CENTER_X
-                last_pos_y = CENTER_Y
-                print("Drawing reset!")
-            elif calibrate_button_rect.collidepoint(event.pos):
-                calibrate_yaw()
-        if event.type == pygame.KEYDOWN:
-            if event.key == pygame.K_c:
-                calibrate_yaw()
-            elif event.key == pygame.K_r:
-                draw_surface.fill((0, 0, 0))
-                current_pos_x = CENTER_X
-                current_pos_y = CENTER_Y
-                last_pos_x = CENTER_X
-                last_pos_y = CENTER_Y
+        elif e.type == pygame.KEYDOWN:
+            if e.key == pygame.K_r:
+                scan_points.clear()
+            elif e.key == pygame.K_c:
+                yaw_offset = sensor["yaw_instant"] - 90.0
+                calibrated = True
+                try:
+                    ser.write(b"CALIB\n")
+                except: pass
+            elif e.key == pygame.K_q:
+                running = False
 
-    # === READ SERIAL ===
+    # Serial read
     if ser.in_waiting:
         try:
-            line = ser.readline().decode('utf-8', errors='ignore').strip()
+            line = ser.readline().decode("utf-8", errors="ignore").strip()
             if line:
-                parts = line.split(',')
-                for part in parts:
-                    if part.startswith("distance="):
-                        distance_cm = int(part.split("=")[1])
-                    elif part.startswith("yaw="):
-                        yaw_angle = float(part.split("=")[1])
-        except:
-            pass
+                parsed = parse_line(line)
+                
+                if "distance" in parsed:
+                    raw_dist = float(parsed["distance"])
+                    sensor["distance_raw"] = movavg(map_dist_hist, raw_dist)
+                    beam_distance = raw_dist
+                
+                if "yaw" in parsed:
+                    raw_yaw = wrap360(float(parsed["yaw"]))
+                    sensor["yaw_instant"] = raw_yaw
+                    sensor["yaw_raw"] = raw_yaw
+                
+                if "direction" in parsed: sensor["direction"] = parsed["direction"]
+                if "object" in parsed: sensor["object"] = parsed["object"]
+                if "gyro" in parsed: sensor["gyro"] = parsed["gyro"]
+        except: pass
 
-    # === TURN DETECTION ===
-    if detect_gyro_turn():
-        current_direction_angle = get_calibrated_angle()
-
-    # === CONTINUOUS DRAWING ===
-    if 0 < distance_cm <= DRAW_LIMIT_CM and calibrated:
-        # Move pen in current direction
-        angle_rad = math.radians(current_direction_angle)
-        dx = math.cos(angle_rad) * DRAW_SPEED
-        dy = math.sin(angle_rad) * DRAW_SPEED
-
-        last_pos_x = current_pos_x
-        last_pos_y = current_pos_y
-        current_pos_x += dx
-        current_pos_y += dy
-
-        # Keep inside screen
-        current_pos_x = max(10, min(WIDTH - 10, current_pos_x))
-        current_pos_y = max(10, min(HEIGHT - 10, current_pos_y))
-
-        # Draw line
-        pygame.draw.line(draw_surface, (0, 255, 0),
-                         (int(last_pos_x), int(last_pos_y)),
-                         (int(current_pos_x), int(current_pos_y)), 3)
-
-        pygame.draw.circle(screen, (0, 255, 0),
-                          (int(current_pos_x), int(current_pos_y)), 6)
-    else:
-        # Red circle when out of range
-        pygame.draw.circle(screen, (255, 0, 0),
-                          (int(current_pos_x), int(current_pos_y)), 4)
-
-    # === UI ===
-    pygame.draw.rect(screen, (200, 0, 0), reset_button_rect)
-    screen.blit(font.render("RESET", True, (255, 255, 255)), (WIDTH - 85, 15))
+    # Calculate angles
+    beam_angle = get_beam_angle(sensor["yaw_instant"])
+    map_angle = get_map_angle(sensor["yaw_raw"])
     
-    pygame.draw.rect(screen, (0, 200, 0) if calibrated else (100, 100, 100), calibrate_button_rect)
-    screen.blit(font.render("CALIB", True, (255, 255, 255)), (WIDTH - 85, 55))
+    # Calculate distances
+    beam_plot_distance = clamp(beam_distance, 0.0, MAX_CM) if sensor["object"].lower() != "none" and beam_distance < MAX_CM else MAX_CM
+    distance_plot = clamp(sensor["distance_raw"], 0.0, MAX_CM) if sensor["object"].lower() != "none" and sensor["distance_raw"] < MAX_CM else MAX_CM
 
-    screen.blit(font.render(f"Distance: {distance_cm} cm", True, (255, 255, 255)), (10, 10))
-    screen.blit(font.render(f"Raw Yaw: {yaw_angle:.1f}°", True, (255, 255, 255)), (10, 35))
-    if calibrated:
-        screen.blit(font.render(f"Direction: {current_direction_angle:.1f}°", True, (0, 255, 0)), (10, 60))
-    else:
-        screen.blit(font.render("Press 'C' to calibrate", True, (255, 255, 0)), (10, 60))
+    # Update map
+    if map_angle is not None and 0 <= map_angle <= 180:
+        angle_key = int(round(map_angle))
+        scan_points[angle_key] = polar_to_xy(angle_key, distance_plot)
+
+    # Draw everything
+    screen.fill(BLACK)
+    draw_radar_display()
+    draw_scan_data()
+    if beam_angle is not None:
+        draw_beam(beam_angle, beam_plot_distance)
+    draw_ui()
 
     pygame.display.flip()
     clock.tick(60)
 
+ser.close()
 pygame.quit()
