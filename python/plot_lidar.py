@@ -61,7 +61,8 @@ distance_plot = 0.0
 beam_distance = 0.0
 calibrated = False
 yaw_offset = 0.0
-scan_points = {}
+# Enhanced scan_points structure
+scan_points = {}  # angle -> {'coord': (x,y), 'has_object': bool, 'distance': float}
 
 # UI Layout
 PANEL_WIDTH = 320
@@ -188,14 +189,49 @@ def draw_radar_display():
         label_rect = label.get_rect(center=label_pos)
         screen.blit(label, label_rect)
 
-
 def draw_scan_data():
-    if len(scan_points) > 1:
-        coords = [scan_points[a] for a in sorted(scan_points.keys())]
-        if len(coords) > 1:
-            pygame.draw.lines(screen, DARK_GREEN, False, coords, 3)
-        for coord in coords:
-            pygame.draw.circle(screen, GREEN, coord, 3)
+    if not scan_points:
+        return
+    
+    # Draw continuous dotted line connecting all scan points
+    all_angles = sorted(scan_points.keys())
+    if len(all_angles) > 1:
+        # Create a smooth dotted line across all scanned angles
+        for i in range(len(all_angles) - 1):
+            angle1 = all_angles[i]
+            angle2 = all_angles[i + 1]
+            
+            # Get coordinates for both points
+            data1 = scan_points[angle1]
+            data2 = scan_points[angle2]
+            
+            # Use detection coordinates if available, otherwise use max range
+            coord1 = data1['coord'] if data1['has_object'] else polar_to_xy(angle1, MAX_CM)
+            coord2 = data2['coord'] if data2['has_object'] else polar_to_xy(angle2, MAX_CM)
+            
+            # Draw fine dotted line between consecutive points with no gaps
+            draw_dotted_line(coord1, coord2, GREEN, dot_size=1, spacing=2)
+
+def draw_dotted_line(start_pos, end_pos, color, dot_size=1, spacing=2):
+    """Draw a fine dotted line with no gaps between two points"""
+    start_x, start_y = start_pos
+    end_x, end_y = end_pos
+    
+    # Calculate distance and direction
+    dx = end_x - start_x
+    dy = end_y - start_y
+    distance = math.sqrt(dx*dx + dy*dy)
+    
+    if distance == 0:
+        return
+    
+    # Draw very fine dots with minimal spacing for continuous appearance
+    num_dots = int(distance / spacing) + 1
+    for i in range(num_dots + 1):
+        progress = i / max(num_dots, 1) if num_dots > 0 else 0
+        dot_x = start_x + progress * dx
+        dot_y = start_y + progress * dy
+        pygame.draw.circle(screen, color, (int(dot_x), int(dot_y)), dot_size)
 
 def draw_beam(angle_deg, dist_cm):
     if angle_deg is None:
@@ -296,7 +332,7 @@ def draw_ui():
         screen.blit(title, (30, 30))
         
         # Range indicator
-        range_text = font_medium.render(f"MAX RANGE: {MAX_CM}m", True, LIGHT_GRAY)
+        range_text = font_medium.render(f"MAX RANGE: {MAX_CM}cm", True, LIGHT_GRAY)
         screen.blit(range_text, (30, 70))
         
         return minimize_btn
@@ -319,6 +355,24 @@ while running:
                 except: pass
             elif e.key == pygame.K_q:
                 running = False
+            elif e.key == pygame.K_m:
+                minimized = not minimized
+                if minimized:
+                    screen = pygame.display.set_mode((MINI_WIDTH, MINI_HEIGHT))
+                else:
+                    screen = pygame.display.set_mode((WIDTH, HEIGHT))
+        elif e.type == pygame.MOUSEBUTTONDOWN:
+            # Handle minimize/maximize button clicks
+            if minimized:
+                expand_btn = pygame.Rect(MINI_WIDTH - 35, 5, 25, 20)
+                if expand_btn.collidepoint(e.pos):
+                    minimized = False
+                    screen = pygame.display.set_mode((WIDTH, HEIGHT))
+            else:
+                minimize_btn = pygame.Rect(WIDTH - 60, 10, 50, 25)
+                if minimize_btn.collidepoint(e.pos):
+                    minimized = True
+                    screen = pygame.display.set_mode((MINI_WIDTH, MINI_HEIGHT))
 
     # Serial read
     if ser.in_waiting:
@@ -350,17 +404,27 @@ while running:
     beam_plot_distance = clamp(beam_distance, 0.0, MAX_CM) if sensor["object"].lower() != "none" and beam_distance < MAX_CM else MAX_CM
     distance_plot = clamp(sensor["distance_raw"], 0.0, MAX_CM) if sensor["object"].lower() != "none" and sensor["distance_raw"] < MAX_CM else MAX_CM
 
-    # Update map
+    # Update map (Enhanced version)
     if map_angle is not None and 0 <= map_angle <= 180:
         angle_key = int(round(map_angle))
-        scan_points[angle_key] = polar_to_xy(angle_key, distance_plot)
+        has_object = sensor["object"].lower() != "none" and sensor["distance_raw"] < MAX_CM
+        actual_distance = sensor["distance_raw"] if has_object else MAX_CM
+        
+        scan_points[angle_key] = {
+            'coord': polar_to_xy(angle_key, distance_plot),
+            'has_object': has_object,
+            'distance': actual_distance
+        }
 
     # Draw everything
     screen.fill(BLACK)
-    draw_radar_display()
-    draw_scan_data()
-    if beam_angle is not None:
-        draw_beam(beam_angle, beam_plot_distance)
+    
+    if not minimized:
+        draw_radar_display()
+        draw_scan_data()
+        if beam_angle is not None:
+            draw_beam(beam_angle, beam_plot_distance)
+    
     draw_ui()
 
     pygame.display.flip()
