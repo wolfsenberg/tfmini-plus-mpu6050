@@ -127,33 +127,67 @@ def draw_card(surface, x, y, w, h, title, content, title_color=WHITE, bg_color=(
         content_y += 22
 
 def draw_radar_display():
-    # Radar background circle
-    pygame.draw.circle(screen, (15, 15, 15), (CENTER_X, CENTER_Y), MAX_CM * SCALE + 10)
-    pygame.draw.circle(screen, GRAY, (CENTER_X, CENTER_Y), MAX_CM * SCALE, 2)
-    
-    # Range rings
+    # Arc background (outer boundary)
+    pygame.draw.arc(
+        screen,
+        (15, 15, 15),
+        pygame.Rect(
+            CENTER_X - (MAX_CM * SCALE + 10),
+            CENTER_Y - (MAX_CM * SCALE + 10),
+            2 * (MAX_CM * SCALE + 10),
+            2 * (MAX_CM * SCALE + 10)
+        ),
+        math.radians(0),
+        math.radians(180),
+        10
+    )
+
+    # Outer arc border
+    pygame.draw.arc(
+        screen,
+        GRAY,
+        pygame.Rect(
+            CENTER_X - MAX_CM * SCALE,
+            CENTER_Y - MAX_CM * SCALE,
+            2 * MAX_CM * SCALE,
+            2 * MAX_CM * SCALE
+        ),
+        math.radians(0),
+        math.radians(180),
+        2
+    )
+
+    # Range rings (half-circles)
     for r in [10, 20, 30, 40]:
-        pygame.draw.circle(screen, DARK_GRAY, (CENTER_X, CENTER_Y), r * SCALE, 1)
-    
-    # Angle lines
+        pygame.draw.arc(
+            screen,
+            DARK_GRAY,
+            pygame.Rect(CENTER_X - r * SCALE, CENTER_Y - r * SCALE, r * SCALE * 2, r * SCALE * 2),
+            math.radians(0),
+            math.radians(180),
+            1
+        )
+
+    # Angle lines (radiating from center, only in top half)
     for angle in range(0, 181, 30):
         end_pos = polar_to_xy(angle, MAX_CM)
         color = LIGHT_GRAY if angle == 90 else DARK_GRAY
         width = 2 if angle == 90 else 1
         pygame.draw.line(screen, color, (CENTER_X, CENTER_Y), end_pos, width)
-    
-    # Range labels
+
+    # Range labels (on the middle vertical line)
     for r in [10, 20, 30, 40, 50]:
         label_pos = polar_to_xy(90, r)
         label = font_small.render(f"{r}cm", True, LIGHT_GRAY)
         screen.blit(label, (label_pos[0] - 15, label_pos[1] - 10))
-    
-    # Angle labels
+
+    # Angle labels (top arc only)
     for angle in [0, 30, 60, 90, 120, 150, 180]:
         label_pos = polar_to_xy(angle, MAX_CM + 15)
         label = font_small.render(f"{angle}°", True, LIGHT_GRAY)
         label_rect = label.get_rect(center=label_pos)
         screen.blit(label, label_rect)
+
 
 def draw_scan_data():
     if len(scan_points) > 1:
