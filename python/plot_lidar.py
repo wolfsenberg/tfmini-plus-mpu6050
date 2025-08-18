@@ -9,7 +9,7 @@ PORT = "COM4"     # change if needed
 BAUD = 9600
 WIDTH, HEIGHT = 1400, 900
 CENTER_X, CENTER_Y = WIDTH // 2 - 100, int(HEIGHT // 1.4)
-MAX_CM = 50
+MAX_CM = 70
 SCALE = 7                    # pixels per cm
 MAP_SMOOTH_N = 8             # heavier smoothing for map points
 BEAM_SMOOTH_N = 2            # minimal smoothing for beam
@@ -68,7 +68,7 @@ scan_points = {}  # angle -> {'coord': (x,y), 'has_object': bool, 'distance': fl
 PANEL_WIDTH = 320
 PANEL_X = WIDTH - PANEL_WIDTH - 20
 PANEL_Y = 20
-CARD_HEIGHT = 120
+CARD_HEIGHT = 140
 SPACING = 15
 
 # ===== HELPERS =====
@@ -159,7 +159,7 @@ def draw_radar_display():
     )
 
     # Range rings (half-circles)
-    for r in [10, 20, 30, 40]:
+    for r in [10, 20, 30, 40, 50, 60]:
         pygame.draw.arc(
             screen,
             DARK_GRAY,
@@ -177,7 +177,7 @@ def draw_radar_display():
         pygame.draw.line(screen, color, (CENTER_X, CENTER_Y), end_pos, width)
 
     # Range labels (on the middle vertical line)
-    for r in [10, 20, 30, 40, 50]:
+    for r in [10, 20, 30, 40, 50, 60, 70]:
         label_pos = polar_to_xy(90, r)
         label = font_small.render(f"{r}cm", True, LIGHT_GRAY)
         screen.blit(label, (label_pos[0] - 15, label_pos[1] - 10))

@@ -69,7 +69,7 @@ void loop() {
         if (uart[8] == (check & 0xff)) {
           dist = uart[2] + uart[3] * 256;
 
-          if (dist > 50) dist = 50; // Limit
+          if (dist > 70) dist = 70; // Limit
 
           // Direction
           String direction = "Stationary";
@@ -77,7 +77,7 @@ void loop() {
           else if (GyroZ < -gyroThreshold) direction = "Left";
 
           // Object detection
-          String objStatus = (dist < 50) ? "Detected" : "None";
+          String objStatus = (dist < 70) ? "Detected" : "None";
 
           // Gyro status
           gyroMoving = abs(GyroZ) > gyroThreshold;
