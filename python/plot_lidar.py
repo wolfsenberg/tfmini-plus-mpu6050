@@ -1,11 +1,31 @@
+import os
+import sys
 import serial
+import serial.tools.list_ports
 import pygame
 import time
 import math
 from collections import deque
 
 # ===== SETTINGS =====
-PORT = "COM4"     # change if needed
+def find_arduino_port():
+    """Auto-detect Arduino COM port"""
+    ports = serial.tools.list_ports.comports()
+    for port in ports:
+        if any(keyword in port.description.upper() for keyword in 
+               ['ARDUINO', 'CH340', 'CH341', 'FTDI', 'USB-SERIAL']):
+            return port.device
+    
+    # Try common ports if no Arduino found
+    for port_name in ['COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8']:
+        try:
+            test_port = serial.Serial(port_name, 9600, timeout=1)
+            test_port.close()
+            return port_name
+        except:
+            continue
+    return None
+
 BAUD = 9600
 WIDTH, HEIGHT = 1400, 900
 CENTER_X, CENTER_Y = WIDTH // 2 - 100, int(HEIGHT // 1.4)
@@ -27,13 +47,46 @@ DARK_GRAY = (30, 30, 30)
 BLUE = (100, 150, 255)
 
 # ===== SERIAL =====
+PORT = find_arduino_port()
+if PORT is None:
+    print("No Arduino found! Check connection and drivers.")
+    input("Press Enter to exit...")
+    exit()
+
+print(f"Arduino found on {PORT}")
 ser = serial.Serial(PORT, BAUD, timeout=1)
 time.sleep(2)
 
 # ===== PYGAME =====
 pygame.init()
+os.environ['SDL_VIDEO_WINDOW_POS'] = 'centered'
+
+def resource_path(relative_path):
+    try:
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
+
+# Set icon with multiple attempts
+try:
+    icon_path = resource_path("objectscanner4.png")
+    icon = pygame.image.load(resource_path("objectscanner4.ico"))
+    
+    # Set icon BEFORE any display operations
+    pygame.display.set_icon(icon)
+    
+    # Force immediate update
+    pygame.event.pump()
+    
+    print("Icon loaded successfully")
+except Exception as e:
+    print(f"Icon failed: {e}")
+
+
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
-pygame.display.set_caption("Radar Display")
+
+pygame.display.set_caption("Object Scanner")
 clock = pygame.time.Clock()
 font_small = pygame.font.SysFont('Arial', 16)
 font_medium = pygame.font.SysFont('Arial', 18, bold=True)
@@ -328,7 +381,7 @@ def draw_ui():
                   "CONTROLS", controls_content, BLUE)
         
         # Title
-        title = font_large.render("OBJECT SCANNER XD", True, WHITE)
+        title = font_large.render("OBJECT SCANNER", True, WHITE)
         screen.blit(title, (30, 30))
         
         # Range indicator
